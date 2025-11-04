@@ -11,17 +11,23 @@ CHAT_ID = os.environ.get("CHAT_ID")
 def home():
     return "✅ Bot activo y escuchando en Render"
 
-@app.route('/send', methods=['GET', 'POST'])
+@app.route('/send', methods=['POST'])
 def send_message():
-    text = request.args.get('text', 'Sin texto')
-    if BOT_TOKEN and CHAT_ID:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}
-        requests.post(url, data=payload)
+    data = request.get_json(force=True, silent=True) or {}
+    text = data.get('text', '⚠️ No se recibió texto desde TradingView')
+
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {
+        'chat_id': CHAT_ID,
+        'text': text,
+        'parse_mode': 'Markdown'
+    }
+    r = requests.post(url, json=payload)
+
+    if r.status_code == 200:
         return "✅ Mensaje enviado a Telegram"
     else:
-        return "❌ Error: BOT_TOKEN o CHAT_ID no configurado"
+        return f"❌ Error enviando mensaje: {r.text}"
 
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
