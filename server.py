@@ -1,11 +1,50 @@
 # server.py
 from flask import Flask, request
-import requests, os, json, re
+import requests, os, json
+from urllib.parse import parse_qs
 
 app = Flask(__name__)
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-CHAT_ID   = os.environ.get("CHAT_ID", "")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+CHAT_ID   = os.environ.get("CHAT_ID")
+
+def extract_text(req):
+    # 1) JSON bien formado
+    data = request.get_json(silent=True)
+    if isinstance(data, dict):
+        for k in ("texto", "text", "message", "alert", "payload"):
+            v = data.get(k)
+            if v:
+                return str(v)
+
+    # 2) Cuerpo crudo: puede ser JSON como texto o formulario
+    raw = request.get_data(as_text=True) or ""
+    if raw:
+        # 2a) Intentar JSON en crudo
+        try:
+            obj = json.loads(raw)
+            if isinstance(obj, dict):
+                for k in ("texto", "text", "message", "alert", "payload"):
+                    v = obj.get(k)
+                    if v:
+                        return str(v)
+        except Exception:
+            pass
+        # 2b) Intentar parseo estilo formulario
+        qs = parse_qs(raw)
+        for k in ("texto", "text", "message", "alert", "payload"):
+            if k in qs and qs[k]:
+                return str(qs[k][0])
+        # 2c) Último recurso: devolver el crudo
+        return raw
+
+    # 3) Querystring
+    for k in ("texto", "text", "message"):
+        v = request.args.get(k)
+        if v:
+            return v
+
+    return None
 
 @app.route("/")
 def home():
@@ -13,51 +52,12 @@ def home():
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    # 1) Intento principal: JSON nativo
-    data = request.get_json(silent=True)
-    text = None
-
-    if isinstance(data, dict):
-        # Acepta varias claves por compatibilidad
-        text = data.get("texto") or data.get("text") or data.get("message")
-    elif isinstance(data, str):
-        # Algunos clientes mandan un string JSON o texto plano
-        text = data
-
-    # 2) Fallback leyendo el cuerpo crudo
-    if not text:
-        raw = request.data.decode("utf-8") if request.data else ""
-
-        # 2a) Si es JSON válido, lo cargo
-        try:
-            j = json.loads(raw)
-            if isinstance(j, dict):
-                text = j.get("texto") or j.get("text") or j.get("message")
-            elif isinstance(j, str):
-                text = j
-        except Exception:
-            # 2b) Si llega como texto plano con forma {"texto":"..."}
-            m = re.match(r'^\s*\{\s*"texto"\s*:\s*"(.*)"\s*\}\s*$', raw, re.S)
-            if m:
-                # Decodifica secuencias escapadas (\n, \") si las hubiera
-                text = m.group(1).encode("utf-8").decode("unicode_escape")
-            else:
-                text = raw
-
+    text = extract_text(request)
     if not text:
         text = "⚠️ No se recibió texto desde TradingView"
-
-    # 3) Envío a Telegram
-    if BOT_TOKEN and CHAT_ID:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}
-        try:
-            requests.post(url, json=payload, timeout=10)
-        except Exception:
-            pass  # No tumbar el servidor por errores de red
-
-    return ("ok", 200)
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    requests.post(url, json={"chat_id": CHAT_ID, "text": text}, timeout=10)
+    return {"ok": True}, 200
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "10000"))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "10000")))
