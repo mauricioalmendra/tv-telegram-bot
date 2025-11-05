@@ -1,63 +1,105 @@
 # server.py
 from flask import Flask, request
-import requests, os, json
-from urllib.parse import parse_qs
+import requests
+import os
+import json
 
 app = Flask(__name__)
 
+# Variables de entorno en Render: BOT_TOKEN y CHAT_ID
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID   = os.environ.get("CHAT_ID")
 
-def extract_text(req):
-    # 1) JSON bien formado
-    data = request.get_json(silent=True)
-    if isinstance(data, dict):
-        for k in ("texto", "text", "message", "alert", "payload"):
-            v = data.get(k)
-            if v:
-                return str(v)
+def send_to_telegram(text: str) -> None:
+    """
+    Envía el mensaje 'text' al chat indicado por CHAT_ID usando el bot BOT_TOKEN.
+    Mantiene compatibilidad con Markdown y caracteres Unicode.
+    """
+    if not BOT_TOKEN or not CHAT_ID:
+        # Si faltan variables, no lanzar excepción para no tumbar el proceso.
+        return
 
-    # 2) Cuerpo crudo: puede ser JSON como texto o formulario
-    raw = request.get_data(as_text=True) or ""
-    if raw:
-        # 2a) Intentar JSON en crudo
-        try:
-            obj = json.loads(raw)
-            if isinstance(obj, dict):
-                for k in ("texto", "text", "message", "alert", "payload"):
-                    v = obj.get(k)
-                    if v:
-                        return str(v)
-        except Exception:
-            pass
-        # 2b) Intentar parseo estilo formulario
-        qs = parse_qs(raw)
-        for k in ("texto", "text", "message", "alert", "payload"):
-            if k in qs and qs[k]:
-                return str(qs[k][0])
-        # 2c) Último recurso: devolver el crudo
-        return raw
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": text,
+        "parse_mode": "Markdown",          # Mantiene negritas con *texto*
+        "disable_web_page_preview": True,  # Evita previews accidentales
+        "allow_sending_without_reply": True
+    }
+    try:
+        requests.post(url, json=payload, timeout=10)
+    except Exception:
+        # Evita que un fallo de red derribe el contenedor
+        pass
 
-    # 3) Querystring
-    for k in ("texto", "text", "message"):
-        v = request.args.get(k)
-        if v:
-            return v
 
-    return None
-
-@app.route("/")
+@app.route("/", methods=["GET"])
 def home():
     return "✅ Bot activo y escuchando en Render"
 
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    text = extract_text(request)
-    if not text:
-        text = "⚠️ No se recibió texto desde TradingView"
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    requests.post(url, json={"chat_id": CHAT_ID, "text": text}, timeout=10)
+
+@app.route("/ping", methods=["GET", "POST"])
+def ping():
+    # Comprobación manual desde navegador o Web Shell de Render
+    send_to_telegram("✅ Ping desde Render (post-fix)")
+    return "pong", 200
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    # Endpoint simple para health checks
     return {"ok": True}, 200
 
+
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    """
+    Endpoint que recibe el POST de TradingView.
+    Acepta estos formatos:
+      1) JSON con clave "texto"   -> {"texto": "..."}
+      2) JSON con clave "text"    -> {"text": "..."}
+      3) JSON con clave "message" -> {"message": "..."}  (formato por defecto de TV)
+      4) Cuerpo como texto plano  -> '{"texto":"..."}' o el mensaje directo
+
+    Si 'message' trae un JSON en string, intenta extraer "texto"/"message" interno.
+    """
+    try:
+        data = request.get_json(silent=True) or request.form.to_dict() or {}
+        raw  = request.get_data(as_text=True) or ""
+
+        # Preferencias de claves habituales
+        text = data.get("texto") or data.get("text") or data.get("message")
+
+        # Si llegó en bruto, úsalo
+        if not text and raw:
+            text = raw.strip()
+
+        # Si 'text' es un JSON serializado, intenta decodificar y extraer
+        if text:
+            try:
+                obj = json.loads(text)
+                if isinstance(obj, dict):
+                    text = obj.get("texto") or obj.get("message") or text
+            except Exception:
+                # No era JSON, seguir con el string original
+                pass
+
+        if not text:
+            text = "⚠️ No se recibió texto desde TradingView"
+
+        # Envío a Telegram
+        send_to_telegram(text)
+
+        return {"ok": True}, 200
+
+    except Exception as e:
+        # Respuesta controlada ante errores inesperados
+        send_to_telegram(f"⚠️ Error en webhook: {e}")
+        return {"ok": False, "error": str(e)}, 500
+
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "10000")))
+    # Render asigna PORT; por compatibilidad dejamos 10000 por defecto
+    port = int(os.environ.get("PORT", "10000"))
+    app.run(host="0.0.0.0", port=port)
