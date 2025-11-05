@@ -1,64 +1,49 @@
+# server.py
 from flask import Flask, request
 import requests, os, json
 
 app = Flask(__name__)
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-CHAT_ID = os.environ.get("CHAT_ID", "")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+CHAT_ID = os.environ.get("CHAT_ID")
 
 @app.route("/")
 def home():
-    return "✅ Bot activo y escuchando en Render"
+    return "🟢 Bot activo y escuchando en Render"
 
-@app.route("/webhook", methods=["POST", "GET"])
+@app.route("/webhook", methods=["POST"])
 def webhook():
-    # — Logs de entrada para depurar —
-    try:
-        raw = request.get_data(as_text=True) or ""
-        print("== Headers ==", dict(request.headers))
-        print("== Raw body ==", raw[:800])
-    except Exception as e:
-        print("No se pudo leer el body:", e)
-        raw = ""
-
-    # 1) Intentar JSON nativo
+    # 1) intenta leer JSON
     data = request.get_json(silent=True)
-    # 2) Intentar parsear texto crudo como JSON
-    if not data and raw:
-        try:
-            data = json.loads(raw)
-        except Exception:
-            data = {}
-
-    # 3) Buscar el mensaje en varias claves típicas
     text = None
+
     if isinstance(data, dict):
-        for k in ("text", "texto", "message", "alert_message", "comentario", "comment", "mensaje"):
-            v = data.get(k)
-            if v and str(v).strip():
-                text = str(v)
-                break
+        # acepta "text" o "texto"
+        text = data.get("text") or data.get("texto")
 
-    # 4) Fallback: querystring (?text=... o ?texto=...)
+    # 2) si no vino JSON, toma el cuerpo crudo (TradingView suele enviar text/plain)
     if not text:
-        text = request.args.get("text") or request.args.get("texto")
+        raw = request.get_data(as_text=True) or ""
+        raw = raw.strip()
+        if raw:
+            # si el cuerpo es JSON en texto, parsea; si no, úsalo como texto tal cual
+            if raw.startswith("{") and raw.endswith("}"):
+                try:
+                    j = json.loads(raw)
+                    text = j.get("text") or j.get("texto") or raw
+                except Exception:
+                    text = raw
+            else:
+                text = raw
 
-    # 5) Último recurso: el body crudo entero
+    # 3) fallback
     if not text:
-        text = raw if raw.strip() else "⚠️ No se recibió texto desde TradingView"
+        text = "⚠️ No se recibió texto desde TradingView"
 
-    payload = {"chat_id": CHAT_ID, "text": text}
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}
     try:
-        r = requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            json=payload, timeout=10
-        )
-        print("Telegram resp:", r.status_code, r.text[:200])
-    except Exception as e:
-        print("Error enviando a Telegram:", e)
-
-    return "ok", 200
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "10000"))
-    app.run(host="0.0.0.0", port=port)
+        requests.post(url, json=payload, timeout=10)
+    except Exception:
+        pass
+    return {"ok": True}, 200
